@@ -125,12 +125,10 @@ def process_grid_directory(args):
         # Read SHA256 file
         sha256_file = os.path.join(grid_path, "SHA256")
         if not os.path.exists(sha256_file):
-            # If there are .npy files but no SHA256, that's an error
+            # If there are .npy files but no SHA256, log warning and skip
             if has_npy_files:
-                raise FileNotFoundError(
-                    f"Missing SHA256 file in tile directory: {sha256_file}"
-                )
-            return None  # Otherwise skip this directory
+                logger.warning(f"Skipping directory without SHA256 file: {sha256_file}")
+            return None  # Skip this directory
 
         # Parse hashes from SHA256 file
         embedding_hash = None
@@ -156,14 +154,35 @@ def process_grid_directory(args):
         embedding_path = os.path.join(grid_path, f"{grid_item}.npy")
         scales_path = os.path.join(grid_path, f"{grid_item}_scales.npy")
 
-        if not os.path.exists(embedding_path):
-            raise FileNotFoundError(f"Missing embedding file: {embedding_path}")
-        if not os.path.exists(scales_path):
-            raise FileNotFoundError(f"Missing scales file: {scales_path}")
+        embedding_exists = os.path.exists(embedding_path)
+        scales_exists = os.path.exists(scales_path)
+
+        # Skip directories with incomplete npy/scales files (one but not the other)
+        if embedding_exists and not scales_exists:
+            logger.warning(
+                f"Skipping directory with incomplete files (missing scales): {grid_path}"
+            )
+            return None
+        if scales_exists and not embedding_exists:
+            logger.warning(
+                f"Skipping directory with incomplete files (missing embedding): {grid_path}"
+            )
+            return None
+        if not embedding_exists and not scales_exists:
+            # Both missing - skip silently (probably not a tile directory)
+            return None
+
+        # Check for hashes in SHA256 file
         if embedding_hash is None:
-            raise ValueError(f"No hash found for embedding in {sha256_file}")
+            logger.warning(
+                f"Skipping directory - no hash found for embedding in SHA256 file: {sha256_file}"
+            )
+            return None
         if scales_hash is None:
-            raise ValueError(f"No hash found for scales in {sha256_file}")
+            logger.warning(
+                f"Skipping directory - no hash found for scales in SHA256 file: {sha256_file}"
+            )
+            return None
 
         # Get file stats
         embedding_stat = os.stat(embedding_path)
@@ -1314,312 +1333,8 @@ def generate_tiff_checksums(base_dir, force=False):
         return 1
 
 
-def process_grid_sha256_scan(args):
-    """Process a single grid directory's SHA256 file for scanning.
-
-    Args:
-        args: Tuple of (year_dir, grid_name, year)
-
-    Returns:
-        Tuple of (grid_name, block_key, entries, success, error_msg)
-        where entries is a list of (rel_path, checksum) tuples
-    """
-    year_dir, grid_name, year = args
-    grid_path = os.path.join(year_dir, grid_name)
-    sha256_file = os.path.join(grid_path, "SHA256")
-
-    try:
-        # Parse coordinates from grid name
-        lon, lat = parse_grid_name(grid_name)
-        if lon is None or lat is None:
-            return (
-                grid_name,
-                None,
-                [],
-                False,
-                f"Could not parse coordinates from {grid_name}",
-            )
-
-        # Get block coordinates
-        block_lon, block_lat = block_from_world(lon, lat)
-        block_key = (block_lon, block_lat)
-
-        # Read SHA256 file and collect entries
-        entries = []
-        if os.path.exists(sha256_file):
-            with open(sha256_file, "r") as f:
-                for line in f:
-                    line = line.strip()
-                    if line and not line.startswith("#"):
-                        parts = line.split()
-                        if len(parts) >= 2:
-                            checksum = parts[0].strip()
-                            filename = parts[-1].strip()
-                            year_clean = year.strip()
-                            grid_name_clean = grid_name.strip()
-                            # Convert to relative path from base_dir
-                            rel_path = f"{year_clean}/{grid_name_clean}/{filename}"
-                            entries.append((rel_path, checksum))
-
-        return (grid_name, block_key, entries, True, None)
-
-    except Exception as e:
-        return (grid_name, None, [], False, str(e))
-
-
-def scan_embeddings_from_checksums(base_dir, registry_dir, console, db_mode=False):
-    """Scan SHA256 files in embeddings directory and generate pooch-compatible registries."""
-    console.print(Panel.fit("📡 Scanning Embeddings", style="cyan"))
-
-    # Process each year directory
-    year_dirs = []
-    for item in os.listdir(base_dir):
-        if item.isdigit() and len(item) == 4:  # Year directories
-            year_path = os.path.join(base_dir, item)
-            if os.path.isdir(year_path):
-                year_dirs.append(item)
-
-    if not year_dirs:
-        console.print("[red]No year directories found[/red]")
-        return False
-
-    files_by_year_and_block = defaultdict(lambda: defaultdict(list))
-    total_entries = 0
-
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TaskProgressColumn(),
-        console=console,
-    ) as progress:
-        for year in sorted(year_dirs):
-            year_dir = os.path.join(base_dir, year)
-            console.print(f"[blue]Processing year:[/blue] {year}")
-
-            # Find all grid directories with SHA256 files
-            grid_dirs = []
-            for item in os.listdir(year_dir):
-                if item.startswith("grid_"):
-                    grid_path = os.path.join(year_dir, item)
-                    sha256_file = os.path.join(grid_path, "SHA256")
-                    if os.path.isdir(grid_path) and os.path.exists(sha256_file):
-                        grid_dirs.append(item)
-
-            console.print(
-                f"  Found [green]{len(grid_dirs)}[/green] grid directories with SHA256 files"
-            )
-
-            # Get number of CPU cores for parallel processing
-            num_cores = multiprocessing.cpu_count()
-            console.print(
-                f"  Using [cyan]{num_cores}[/cyan] CPU cores for parallel processing"
-            )
-
-            # Prepare arguments for parallel processing
-            grid_args = [(year_dir, grid_name, year) for grid_name in sorted(grid_dirs)]
-
-            # Process grid directories in parallel
-            task = progress.add_task(f"Year {year}", total=len(grid_dirs))
-
-            with ProcessPoolExecutor(max_workers=num_cores) as executor:
-                # Submit all tasks
-                futures = {
-                    executor.submit(process_grid_sha256_scan, args): args
-                    for args in grid_args
-                }
-
-                # Process results as they complete
-                for future in as_completed(futures):
-                    grid_name, block_key, entries, success, error_msg = future.result()
-
-                    if success:
-                        if block_key and entries:
-                            # Add all entries from this grid to the appropriate block
-                            files_by_year_and_block[year][block_key].extend(entries)
-                            total_entries += len(entries)
-                    else:
-                        console.print(f"  [yellow]Warning:[/yellow] {error_msg}")
-
-                    progress.advance(task)
-
-    console.print(f"[green]Total entries found:[/green] {total_entries:,}")
-
-    # Generate block-based registry files
-    all_registry_files = []
-
-    for year in sorted(files_by_year_and_block.keys()):
-        blocks_for_year = files_by_year_and_block[year]
-        console.print(
-            f"[blue]Generating registries for year {year}:[/blue] {len(blocks_for_year)} blocks"
-        )
-
-        # Create embeddings subdirectory
-        embeddings_dir = os.path.join(registry_dir, "embeddings")
-        os.makedirs(embeddings_dir, exist_ok=True)
-
-        for (block_lon, block_lat), block_entries in sorted(blocks_for_year.items()):
-            registry_filename = block_to_embeddings_registry_filename(
-                year, block_lon, block_lat
-            )
-            registry_file = os.path.join(embeddings_dir, registry_filename)
-            all_registry_files.append(registry_file)
-
-            console.print(
-                f"  Block ({block_lon}, {block_lat}): {len(block_entries)} files → embeddings/{registry_filename}"
-            )
-
-            # Write registry file atomically using temporary file
-            import tempfile
-
-            temp_path = None
-            try:
-                with tempfile.NamedTemporaryFile(
-                    mode="w",
-                    dir=embeddings_dir,
-                    prefix=f".{registry_filename}_tmp_",
-                    suffix=".txt",
-                    delete=False,
-                ) as temp_file:
-                    temp_path = temp_file.name
-                    for rel_path, checksum in sorted(block_entries):
-                        temp_file.write(f"{rel_path} {checksum}\n")
-
-                # Atomic rename to final location
-                os.rename(temp_path, registry_file)
-                temp_path = None  # Successfully renamed, no cleanup needed
-
-            except Exception:
-                # Clean up temporary file on error
-                if temp_path and os.path.exists(temp_path):
-                    os.remove(temp_path)
-                raise
-
-    # Summary
-    if all_registry_files:
-        console.print(
-            f"[green]{emoji('✓ ')}Created {len(all_registry_files)} registry files[/green]"
-        )
-
-    return len(all_registry_files) > 0
-
-
-def scan_tiffs_from_checksums(base_dir, registry_dir, console):
-    """Scan SHA256SUM file in TIFF directory and generate block-based pooch-compatible registry."""
-    console.print(Panel.fit("🗺️  Scanning TIFF Files", style="cyan"))
-
-    sha256sum_file = os.path.join(base_dir, "SHA256SUM")
-    if not os.path.exists(sha256sum_file):
-        console.print(f"[red]SHA256SUM file not found:[/red] {sha256sum_file}")
-        return False
-
-    # Read all TIFF entries from SHA256SUM
-    tiff_blocks = defaultdict(list)
-    total_entries = 0
-
-    console.print("[blue]Reading SHA256SUM file...[/blue]")
-    try:
-        with open(sha256sum_file, "r") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    parts = line.split()
-                    if len(parts) >= 2:
-                        checksum = parts[0]
-                        filename = parts[-1]  # Take the last part as filename
-                        if filename.endswith(".tiff") or filename.endswith(".tif"):
-                            # Extract coordinates from filename (e.g., grid_-0.35_55.45.tiff)
-                            if filename.startswith("grid_"):
-                                try:
-                                    # Remove 'grid_' prefix and '.tiff' suffix
-                                    coords_str = (
-                                        filename[5:]
-                                        .replace(".tiff", "")
-                                        .replace(".tif", "")
-                                    )
-                                    lon_str, lat_str = coords_str.split("_")
-                                    lon = float(lon_str)
-                                    lat = float(lat_str)
-
-                                    # Determine block coordinates (5x5 degree blocks)
-                                    block_lon, block_lat = block_from_world(lon, lat)
-
-                                    # Add to appropriate block
-                                    tiff_blocks[(block_lon, block_lat)].append(
-                                        (filename, checksum)
-                                    )
-                                    total_entries += 1
-                                except (ValueError, IndexError) as e:
-                                    console.print(
-                                        f"[yellow]Warning: Could not parse coordinates from {filename}: {e}[/yellow]"
-                                    )
-                                    continue
-    except Exception as e:
-        console.print(f"[red]Error reading SHA256SUM file:[/red] {e}")
-        return False
-
-    console.print(f"[green]Total TIFF entries found:[/green] {total_entries:,}")
-    console.print(f"[green]Total blocks:[/green] {len(tiff_blocks)}")
-
-    if not tiff_blocks:
-        console.print("[yellow]No TIFF files found in SHA256SUM[/yellow]")
-        return False
-
-    # Create landmasks subdirectory
-    landmasks_dir = os.path.join(registry_dir, "landmasks")
-    os.makedirs(landmasks_dir, exist_ok=True)
-
-    # Write block-based registry files
-    all_registry_files = []
-    console.print("\n[blue]Writing block-based landmasks registry files:[/blue]")
-
-    for (block_lon, block_lat), block_entries in sorted(tiff_blocks.items()):
-        registry_filename = block_to_landmasks_registry_filename(block_lon, block_lat)
-        registry_file = os.path.join(landmasks_dir, registry_filename)
-        all_registry_files.append(registry_file)
-
-        console.print(
-            f"  Block ({block_lon}, {block_lat}): {len(block_entries)} files → landmasks/{registry_filename}"
-        )
-
-        # Write registry file atomically using temporary file
-        import tempfile
-
-        temp_path = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                dir=landmasks_dir,
-                prefix=f".{registry_filename}_tmp_",
-                suffix=".txt",
-                delete=False,
-            ) as temp_file:
-                temp_path = temp_file.name
-                for rel_path, checksum in sorted(block_entries):
-                    temp_file.write(f"{rel_path} {checksum}\n")
-
-            # Atomic rename to final location
-            os.rename(temp_path, registry_file)
-            temp_path = None  # Successfully renamed, no cleanup needed
-
-        except Exception:
-            # Clean up temporary file on error
-            if temp_path and os.path.exists(temp_path):
-                os.remove(temp_path)
-            raise
-
-    if all_registry_files:
-        console.print(
-            f"[green]{emoji('✓ ')}Created {len(all_registry_files)} landmasks registry files[/green]"
-        )
-
-    console.print(f"[green]{emoji('✓ ')}Landmasks registry written[/green]")
-
-    return True
-
-
 def scan_command(args):
-    """Scan SHA256 checksum files and generate both parquet database and registry files."""
+    """Scan SHA256 checksum files and generate parquet databases."""
     console = Console()
 
     base_dir = os.path.abspath(args.base_dir)
@@ -1668,44 +1383,6 @@ def scan_command(args):
             f"[yellow]Warning: Landmasks directory not found: {tiles_dir}[/yellow]"
         )
 
-    # Create text-based registry files
-    registry_dir = os.path.join(output_dir, "registry")
-    os.makedirs(registry_dir, exist_ok=True)
-    console.print(f"[cyan]Registry files will be written to:[/cyan] {registry_dir}")
-
-    processed_any = False
-
-    # Process embeddings if directory exists
-    if os.path.exists(repr_dir):
-        if scan_embeddings_from_checksums(
-            repr_dir, registry_dir, console, db_mode=False
-        ):
-            processed_any = True
-    else:
-        console.print(f"[yellow]Embeddings directory not found:[/yellow] {repr_dir}")
-
-    # Process TIFF files if directory exists
-    if os.path.exists(tiles_dir):
-        if scan_tiffs_from_checksums(tiles_dir, registry_dir, console):
-            processed_any = True
-    else:
-        console.print(f"[yellow]TIFF directory not found:[/yellow] {tiles_dir}")
-
-    if not processed_any:
-        console.print(
-            Panel.fit(
-                "[red]No data directories found or no checksum files available.[/red]\n\n"
-                f"Expected:\n"
-                f"• {repr_dir}\n"
-                f"  (with SHA256 files in grid subdirectories)\n"
-                f"• {tiles_dir}\n"
-                f"  (with SHA256SUM file)\n\n"
-                f"[yellow]{emoji('💡 ')}Run 'geotessera-registry hash' first to generate checksum files.[/yellow]",
-                style="red",
-            )
-        )
-        return 1
-
     # Show final summary
     summary_lines = ["[green]✅ Registry Generation Complete[/green]\n"]
     summary_lines.append("📊 Generated outputs:")
@@ -1713,11 +1390,6 @@ def scan_command(args):
     summary_lines.append(f"  → {embeddings_parquet_path} (embeddings)")
     if os.path.exists(landmasks_parquet_path):
         summary_lines.append(f"  → {landmasks_parquet_path} (landmasks)")
-    summary_lines.append("• Text registry files:")
-    if os.path.exists(repr_dir):
-        summary_lines.append(f"  → registry/embeddings/ (from {repr_dir})")
-    if os.path.exists(tiles_dir):
-        summary_lines.append(f"  → registry/landmasks/ (from {tiles_dir})")
     summary_lines.append(f"📁 Output directory: {output_dir}")
 
     console.print(Panel.fit("\n".join(summary_lines), style="green"))
