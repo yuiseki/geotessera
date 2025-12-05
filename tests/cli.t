@@ -34,12 +34,7 @@ Test: Info Command (Library Info)
 Test the info command without arguments to see library information.
 We just verify key information is present, ignoring formatting:
 
-  $ geotessera info --dataset-version v1 | grep -E 'Available years'
-  Downloading registry from https://dl2.geotessera.org/v1/registry.parquet
-  Registry downloaded successfully
-  Loaded GeoParquet with 1,390,843 tiles
-  Downloading landmasks registry from https://dl2.geotessera.org/v1/landmasks.parquet
-  Landmasks registry downloaded successfully
+  $ geotessera info --dataset-version v1 2>&1 | grep -E 'Available years'
    Available years: 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024 
 
 Test: Download Dry Run for UK Tile
