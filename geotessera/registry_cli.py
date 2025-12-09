@@ -770,6 +770,27 @@ def create_parquet_database_from_filesystem(base_dir, output_path, console):
             for path in sorted(paths):
                 console.print(f"    {path}")
 
+        # Write missing files to separate text files
+        output_dir = Path(output_path).parent
+
+        # Write missing embeddings
+        missing_embeddings = warnings_by_reason.get("missing embedding", [])
+        if missing_embeddings:
+            missing_embeddings_file = output_dir / "missing_embeddings.txt"
+            with open(missing_embeddings_file, "w") as f:
+                for path in sorted(missing_embeddings):
+                    f.write(f"{path}\n")
+            console.print(f"\n[dim]Written {len(missing_embeddings)} paths to {missing_embeddings_file}[/dim]")
+
+        # Write missing scales
+        missing_scales = warnings_by_reason.get("missing scales", [])
+        if missing_scales:
+            missing_scales_file = output_dir / "missing_scales.txt"
+            with open(missing_scales_file, "w") as f:
+                for path in sorted(missing_scales):
+                    f.write(f"{path}\n")
+            console.print(f"[dim]Written {len(missing_scales)} paths to {missing_scales_file}[/dim]")
+
     return True
 
 
@@ -888,6 +909,27 @@ def check_command(args):
             console.print(f"\n[dim]  {reason.capitalize()}:[/dim]")
             for path in sorted(paths):
                 console.print(f"    {path}")
+
+        # Write missing files to separate text files
+        output_dir = Path(base_dir)
+
+        # Write missing embeddings
+        missing_embeddings = warnings_by_reason.get("missing embedding", [])
+        if missing_embeddings:
+            missing_embeddings_file = output_dir / "missing_embeddings.txt"
+            with open(missing_embeddings_file, "w") as f:
+                for path in sorted(missing_embeddings):
+                    f.write(f"{path}\n")
+            console.print(f"\n[dim]Written {len(missing_embeddings)} paths to {missing_embeddings_file}[/dim]")
+
+        # Write missing scales
+        missing_scales = warnings_by_reason.get("missing scales", [])
+        if missing_scales:
+            missing_scales_file = output_dir / "missing_scales.txt"
+            with open(missing_scales_file, "w") as f:
+                for path in sorted(missing_scales):
+                    f.write(f"{path}\n")
+            console.print(f"[dim]Written {len(missing_scales)} paths to {missing_scales_file}[/dim]")
 
     return 0
 
