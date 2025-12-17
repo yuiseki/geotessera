@@ -1,3 +1,12 @@
+## v0.7.3 (2025-12-17)
+
+This release contains registry tooling improvements.
+
+- Retired Pooch text manifest generation in favour of Parquet manifests (@avsm)
+- Added tolerance for incomplete embedding directories during registry scans (@avsm)
+- Improved warning grouping and diagnostics output (@avsm)
+- Missing embeddings now written to a file for easier debugging (@avsm)
+
 ## v0.7.2 (2025-12-02)
 
 This release adds Windows platform support, more robust tolerance to
